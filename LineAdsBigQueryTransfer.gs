@@ -6,11 +6,20 @@
  *
  * 【対応レポート】
  * - ADレポート（日別）
- * - キャンペーンレポート
- * - 広告グループレポート
+ * - キャンペーン設定
+ * - 広告グループ設定
+ * - メディア一覧
  * - 性別レポート
  * - 年齢レポート
  * - デバイス（OS）レポート
+ *
+ * 【アカウント管理】
+ * LINE広告にはMCC機能がないため、アカウント情報はスプレッドシートで管理します。
+ * 「LINE広告アカウント一覧」シートに以下の情報を入力してください：
+ * - A列: アカウントID
+ * - B列: アカウント名
+ * - C列: AccessKey
+ * - D列: SecretKey
  */
 
 // ===========================================
@@ -33,9 +42,10 @@ const CONFIG = {
   // BigQueryテーブル名設定
   TABLES: {
     ACCOUNT_LIST: 'account_list',
-    CAMPAIGN: 'campaign_report',
-    ADGROUP: 'adgroup_report',
+    CAMPAIGN: 'campaign_settings',
+    ADGROUP: 'adgroup_settings',
     AD: 'ad_report',
+    MEDIA: 'media_master',
     GENDER: 'gender_report',
     AGE: 'age_report',
     DEVICE: 'device_report'
@@ -148,6 +158,15 @@ function getDateRange_(dayCount, includeToday) {
 
 /**
  * 対象アカウント一覧を取得（スプレッドシートから）
+ *
+ * LINE広告にはMCC機能がないため、アカウント情報はスプレッドシートで管理します。
+ * 各アカウントごとにAccessKey/SecretKeyが異なるため、アカウントごとに認証を行います。
+ *
+ * シート形式:
+ * - A列: アカウントID
+ * - B列: アカウント名
+ * - C列: AccessKey
+ * - D列: SecretKey
  */
 function getTargetAccounts_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -162,9 +181,9 @@ function getTargetAccounts_() {
   const data = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
   const accounts = [];
 
-  data.forEach(row => {
+  data.forEach((row, index) => {
     const accountId = String(row[0]).trim();
-    const accountName = row[1] || '';
+    const accountName = String(row[1] || '').trim();
     const accessKey = String(row[2]).trim();
     const secretKey = String(row[3]).trim();
 
@@ -175,6 +194,8 @@ function getTargetAccounts_() {
         accessKey: accessKey,
         secretKey: secretKey
       });
+    } else if (accountId) {
+      log_(`⚠ 行${index + 2}: アカウントID ${accountId} の認証情報が不完全です`);
     }
   });
 
@@ -185,6 +206,12 @@ function getTargetAccounts_() {
 // LINE Ads APIクライアントクラス
 // ===========================================
 
+/**
+ * LINE Ads APIクライアント
+ *
+ * 各アカウントごとに異なる認証情報（AccessKey/SecretKey）を使用するため、
+ * アカウントごとにクライアントインスタンスを作成します。
+ */
 class LineAdsClient {
   constructor(accountId, accessKey, secretKey) {
     this.accountId = accountId;
@@ -218,6 +245,7 @@ class LineAdsClient {
       options.payload = payloadStr;
     }
 
+    // 認証ヘッダーを毎回生成（アカウントごとの認証情報を使用）
     options.headers = this._getHeaders(contentType, canonicalURI, payloadStr);
 
     const response = UrlFetchApp.fetch(url, options);
@@ -269,6 +297,7 @@ class LineAdsClient {
 
   /**
    * 認証ヘッダーを取得
+   * アカウントごとのAccessKey/SecretKeyを使用して署名を生成
    */
   _getHeaders(contentType, endpoint, payload) {
     const signature = this._getSignature(contentType, endpoint, payload);
@@ -360,6 +389,10 @@ class LineAdsClient {
    * @param {string} since - 開始日 (yyyy-MM-dd)
    * @param {string} until - 終了日 (yyyy-MM-dd)
    * @param {Object} breakdown - 分類軸オプション
+   *
+   * LINE Ads API breakdown オプション:
+   * - time: 'DAY' | 'HOUR' | 'WEEK' | 'MONTH'
+   * - attribute: 'GENDER' | 'AGE' | 'OS' | 'REGION' | 'DETAILED_REGION'
    */
   createReport(level, since, until, breakdown = { time: 'DAY' }) {
     const endpoint = `/v3/adaccounts/${this.accountId}/pfreports`;
@@ -433,11 +466,12 @@ class LineAdsClient {
   }
 
   // ===========================================
-  // キャンペーン・広告グループ取得メソッド
+  // エンティティ取得メソッド
   // ===========================================
 
   /**
    * キャンペーン一覧を取得
+   * エンドポイント: GET /v3/adaccounts/{adAccountId}/campaigns
    */
   getCampaigns() {
     const endpoint = `/v3/adaccounts/${this.accountId}/campaigns`;
@@ -447,12 +481,23 @@ class LineAdsClient {
 
   /**
    * 広告グループ一覧を取得
+   * エンドポイント: GET /v3/adaccounts/{adAccountId}/adgroups
    */
   getAdGroups(campaignId = null) {
     const endpoint = `/v3/adaccounts/${this.accountId}/adgroups`;
     const params = campaignId ? { campaignId: campaignId } : {};
     const response = this.request('GET', endpoint, params);
     return response.adgroups || response.datas || [];
+  }
+
+  /**
+   * メディア一覧を取得
+   * エンドポイント: GET /v3/adaccounts/{adAccountId}/medias
+   */
+  getMedias() {
+    const endpoint = `/v3/adaccounts/${this.accountId}/medias`;
+    const response = this.request('GET', endpoint, {});
+    return response.medias || response.datas || [];
   }
 }
 
@@ -493,14 +538,14 @@ function getAccountList() {
 }
 
 // ===========================================
-// 2. キャンペーンレポート取得
+// 2. キャンペーン設定取得
 // ===========================================
 
 /**
- * 全アカウントのキャンペーンレポートを取得
+ * 全アカウントのキャンペーン設定を取得
  */
-function fetchAllAccountsCampaignReport() {
-  log_('===== 🚀 全アカウント キャンペーンレポート取得開始 =====');
+function getCampaignSettings() {
+  log_('===== 🚀 全アカウント キャンペーン設定取得開始 =====');
 
   const accounts = getTargetAccounts_();
   if (accounts.length === 0) {
@@ -509,9 +554,6 @@ function fetchAllAccountsCampaignReport() {
   }
 
   log_(`📋 対象アカウント数: ${accounts.length}`);
-
-  const { startStr, endStr } = getDateRange_(CONFIG.DAY_COUNT, CONFIG.INCLUDE_TODAY);
-  log_(`📆 対象期間: ${startStr} ～ ${endStr}`);
 
   let allData = [];
   let successCount = 0;
@@ -522,11 +564,12 @@ function fetchAllAccountsCampaignReport() {
     log_(`\n▶ [${i + 1}/${accounts.length}] ${account.accountId} (${account.accountName})`);
 
     try {
+      // アカウントごとにクライアントを作成（認証情報が異なるため）
       const client = new LineAdsClient(account.accountId, account.accessKey, account.secretKey);
-      const csvData = client.createAndDownloadReport('CAMPAIGN', startStr, endStr, { time: 'DAY' });
+      const campaigns = client.getCampaigns();
 
-      if (csvData.length > 1) {
-        const formattedData = formatCampaignReportData_(csvData, account.accountId, account.accountName);
+      if (campaigns.length > 0) {
+        const formattedData = formatCampaignSettingsData_(campaigns, account.accountId, account.accountName);
         allData = allData.concat(formattedData);
         log_(`  ✅ ${formattedData.length}件取得 → 累計: ${allData.length}件`);
       } else {
@@ -546,79 +589,58 @@ function fetchAllAccountsCampaignReport() {
 
   log_(`\n===== 集計結果 =====`);
   log_(`成功: ${successCount}件 / エラー: ${errorCount}件`);
-  log_(`キャンペーンレポート総数: ${allData.length}件`);
+  log_(`キャンペーン設定総数: ${allData.length}件`);
+
+  const timestamp = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm:ss');
 
   const bqHeader = [
-    'account_id', 'account_name', 'day',
-    'campaign_id', 'campaign_name', 'campaign_status',
-    'impressions', 'clicks', 'conversions', 'cost',
-    'ctr', 'cpc', 'cpm', 'cvr'
+    'account_id', 'account_name',
+    'campaign_id', 'campaign_name', 'campaign_objective',
+    'status', 'budget_type', 'budget_amount',
+    'start_date', 'end_date',
+    'created_date', 'updated_date', 'fetch_timestamp'
   ];
 
-  loadToBigQuery_(CONFIG.TABLES.CAMPAIGN, bqHeader, allData);
+  loadToBigQuery_(CONFIG.TABLES.CAMPAIGN, bqHeader, allData.map(row => [...row, timestamp]));
 
   return allData;
 }
 
 /**
- * キャンペーンレポートデータをフォーマット
+ * キャンペーン設定データをフォーマット
  */
-function formatCampaignReportData_(csvData, accountId, accountName) {
-  if (csvData.length < 2) return [];
-
-  const header = csvData[0];
+function formatCampaignSettingsData_(campaigns, accountId, accountName) {
   const results = [];
 
-  // ヘッダーからインデックスを取得（日本語・英語両対応）
-  const idx = {
-    DAY: findColumnIndex_(header, ['日付', 'date', 'day']),
-    CAMPAIGN_ID: findColumnIndex_(header, ['キャンペーンID', 'campaign_id', 'campaignId']),
-    CAMPAIGN_NAME: findColumnIndex_(header, ['キャンペーン名', 'campaign_name', 'campaignName']),
-    CAMPAIGN_STATUS: findColumnIndex_(header, ['ステータス', 'status', 'campaign_status']),
-    IMPRESSIONS: findColumnIndex_(header, ['インプレッション', 'impressions', 'imps']),
-    CLICKS: findColumnIndex_(header, ['クリック', 'clicks']),
-    CONVERSIONS: findColumnIndex_(header, ['コンバージョン', 'conversions', 'cv']),
-    COST: findColumnIndex_(header, ['費用', 'cost', 'spend']),
-    CTR: findColumnIndex_(header, ['CTR', 'ctr']),
-    CPC: findColumnIndex_(header, ['CPC', 'cpc']),
-    CPM: findColumnIndex_(header, ['CPM', 'cpm']),
-    CVR: findColumnIndex_(header, ['CVR', 'cvr'])
-  };
-
-  for (let i = 1; i < csvData.length; i++) {
-    const row = csvData[i];
-    if (!row || row.length === 0 || !row[0]) continue;
-
+  campaigns.forEach(c => {
     results.push([
       accountId,
       accountName,
-      getValueSafe_(row, idx.DAY),
-      getValueSafe_(row, idx.CAMPAIGN_ID),
-      getValueSafe_(row, idx.CAMPAIGN_NAME),
-      getValueSafe_(row, idx.CAMPAIGN_STATUS),
-      getNumberSafe_(row, idx.IMPRESSIONS),
-      getNumberSafe_(row, idx.CLICKS),
-      getNumberSafe_(row, idx.CONVERSIONS),
-      getNumberSafe_(row, idx.COST),
-      getNumberSafe_(row, idx.CTR),
-      getNumberSafe_(row, idx.CPC),
-      getNumberSafe_(row, idx.CPM),
-      getNumberSafe_(row, idx.CVR)
+      c.id || c.campaignId || '',
+      c.name || c.campaignName || '',
+      c.objective || c.campaignObjective || '',
+      c.status || c.userStatus || '',
+      c.budgetType || c.budget?.type || '',
+      c.budgetAmount || c.budget?.amount || c.budget?.dailyBudget || '',
+      c.startDate || c.startTime || '',
+      c.endDate || c.endTime || '',
+      c.createdDate || c.createdTime || '',
+      c.updatedDate || c.updatedTime || ''
     ]);
-  }
+  });
 
   return results;
 }
 
 // ===========================================
-// 3. 広告グループレポート取得
+// 3. 広告グループ設定取得
 // ===========================================
 
 /**
- * 全アカウントの広告グループレポートを取得
+ * 全アカウントの広告グループ設定を取得
  */
-function fetchAllAccountsAdGroupReport() {
-  log_('===== 🚀 全アカウント 広告グループレポート取得開始 =====');
+function getAdGroupSettings() {
+  log_('===== 🚀 全アカウント 広告グループ設定取得開始 =====');
 
   const accounts = getTargetAccounts_();
   if (accounts.length === 0) {
@@ -627,9 +649,6 @@ function fetchAllAccountsAdGroupReport() {
   }
 
   log_(`📋 対象アカウント数: ${accounts.length}`);
-
-  const { startStr, endStr } = getDateRange_(CONFIG.DAY_COUNT, CONFIG.INCLUDE_TODAY);
-  log_(`📆 対象期間: ${startStr} ～ ${endStr}`);
 
   let allData = [];
   let successCount = 0;
@@ -640,11 +659,12 @@ function fetchAllAccountsAdGroupReport() {
     log_(`\n▶ [${i + 1}/${accounts.length}] ${account.accountId} (${account.accountName})`);
 
     try {
+      // アカウントごとにクライアントを作成（認証情報が異なるため）
       const client = new LineAdsClient(account.accountId, account.accessKey, account.secretKey);
-      const csvData = client.createAndDownloadReport('ADGROUP', startStr, endStr, { time: 'DAY' });
+      const adGroups = client.getAdGroups();
 
-      if (csvData.length > 1) {
-        const formattedData = formatAdGroupReportData_(csvData, account.accountId, account.accountName);
+      if (adGroups.length > 0) {
+        const formattedData = formatAdGroupSettingsData_(adGroups, account.accountId, account.accountName);
         allData = allData.concat(formattedData);
         log_(`  ✅ ${formattedData.length}件取得 → 累計: ${allData.length}件`);
       } else {
@@ -664,70 +684,45 @@ function fetchAllAccountsAdGroupReport() {
 
   log_(`\n===== 集計結果 =====`);
   log_(`成功: ${successCount}件 / エラー: ${errorCount}件`);
-  log_(`広告グループレポート総数: ${allData.length}件`);
+  log_(`広告グループ設定総数: ${allData.length}件`);
+
+  const timestamp = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm:ss');
 
   const bqHeader = [
-    'account_id', 'account_name', 'day',
-    'campaign_id', 'campaign_name',
-    'adgroup_id', 'adgroup_name', 'adgroup_status',
-    'impressions', 'clicks', 'conversions', 'cost',
-    'ctr', 'cpc', 'cpm', 'cvr'
+    'account_id', 'account_name',
+    'campaign_id', 'adgroup_id', 'adgroup_name',
+    'status', 'bid_type', 'bid_amount',
+    'targeting_type', 'os_type',
+    'created_date', 'updated_date', 'fetch_timestamp'
   ];
 
-  loadToBigQuery_(CONFIG.TABLES.ADGROUP, bqHeader, allData);
+  loadToBigQuery_(CONFIG.TABLES.ADGROUP, bqHeader, allData.map(row => [...row, timestamp]));
 
   return allData;
 }
 
 /**
- * 広告グループレポートデータをフォーマット
+ * 広告グループ設定データをフォーマット
  */
-function formatAdGroupReportData_(csvData, accountId, accountName) {
-  if (csvData.length < 2) return [];
-
-  const header = csvData[0];
+function formatAdGroupSettingsData_(adGroups, accountId, accountName) {
   const results = [];
 
-  const idx = {
-    DAY: findColumnIndex_(header, ['日付', 'date', 'day']),
-    CAMPAIGN_ID: findColumnIndex_(header, ['キャンペーンID', 'campaign_id', 'campaignId']),
-    CAMPAIGN_NAME: findColumnIndex_(header, ['キャンペーン名', 'campaign_name', 'campaignName']),
-    ADGROUP_ID: findColumnIndex_(header, ['広告グループID', 'adgroup_id', 'adgroupId', 'ad_group_id']),
-    ADGROUP_NAME: findColumnIndex_(header, ['広告グループ名', 'adgroup_name', 'adgroupName', 'ad_group_name']),
-    ADGROUP_STATUS: findColumnIndex_(header, ['ステータス', 'status', 'adgroup_status']),
-    IMPRESSIONS: findColumnIndex_(header, ['インプレッション', 'impressions', 'imps']),
-    CLICKS: findColumnIndex_(header, ['クリック', 'clicks']),
-    CONVERSIONS: findColumnIndex_(header, ['コンバージョン', 'conversions', 'cv']),
-    COST: findColumnIndex_(header, ['費用', 'cost', 'spend']),
-    CTR: findColumnIndex_(header, ['CTR', 'ctr']),
-    CPC: findColumnIndex_(header, ['CPC', 'cpc']),
-    CPM: findColumnIndex_(header, ['CPM', 'cpm']),
-    CVR: findColumnIndex_(header, ['CVR', 'cvr'])
-  };
-
-  for (let i = 1; i < csvData.length; i++) {
-    const row = csvData[i];
-    if (!row || row.length === 0 || !row[0]) continue;
-
+  adGroups.forEach(ag => {
     results.push([
       accountId,
       accountName,
-      getValueSafe_(row, idx.DAY),
-      getValueSafe_(row, idx.CAMPAIGN_ID),
-      getValueSafe_(row, idx.CAMPAIGN_NAME),
-      getValueSafe_(row, idx.ADGROUP_ID),
-      getValueSafe_(row, idx.ADGROUP_NAME),
-      getValueSafe_(row, idx.ADGROUP_STATUS),
-      getNumberSafe_(row, idx.IMPRESSIONS),
-      getNumberSafe_(row, idx.CLICKS),
-      getNumberSafe_(row, idx.CONVERSIONS),
-      getNumberSafe_(row, idx.COST),
-      getNumberSafe_(row, idx.CTR),
-      getNumberSafe_(row, idx.CPC),
-      getNumberSafe_(row, idx.CPM),
-      getNumberSafe_(row, idx.CVR)
+      ag.campaignId || '',
+      ag.id || ag.adgroupId || '',
+      ag.name || ag.adgroupName || '',
+      ag.status || ag.userStatus || '',
+      ag.bidType || ag.bid?.type || '',
+      ag.bidAmount || ag.bid?.amount || '',
+      ag.targetingType || ag.targeting?.type || '',
+      ag.osType || ag.targeting?.os || '',
+      ag.createdDate || ag.createdTime || '',
+      ag.updatedDate || ag.updatedTime || ''
     ]);
-  }
+  });
 
   return results;
 }
@@ -762,6 +757,7 @@ function fetchAllAccountsAdReport() {
     log_(`\n▶ [${i + 1}/${accounts.length}] ${account.accountId} (${account.accountName})`);
 
     try {
+      // アカウントごとにクライアントを作成（認証情報が異なるため）
       const client = new LineAdsClient(account.accountId, account.accessKey, account.secretKey);
       const csvData = client.createAndDownloadReport('AD', startStr, endStr, { time: 'DAY' });
 
@@ -862,11 +858,112 @@ function formatAdReportData_(csvData, accountId, accountName) {
 }
 
 // ===========================================
-// 5. 性別レポート取得
+// 5. メディア一覧取得
+// ===========================================
+
+/**
+ * 全アカウントのメディア一覧を取得
+ */
+function fetchAllAccountsMedia() {
+  log_('===== 🚀 全アカウント メディア一覧取得開始 =====');
+
+  const accounts = getTargetAccounts_();
+  if (accounts.length === 0) {
+    log_('❌ 対象アカウントがありません');
+    return;
+  }
+
+  log_(`📋 対象アカウント数: ${accounts.length}`);
+
+  let allMediaData = [];
+  let successCount = 0;
+  let errorCount = 0;
+
+  for (let i = 0; i < accounts.length; i++) {
+    const account = accounts[i];
+    log_(`\n▶ [${i + 1}/${accounts.length}] ${account.accountId} (${account.accountName})`);
+
+    try {
+      // アカウントごとにクライアントを作成（認証情報が異なるため）
+      const client = new LineAdsClient(account.accountId, account.accessKey, account.secretKey);
+      const medias = client.getMedias();
+
+      if (medias.length > 0) {
+        const formattedData = formatMediaData_(medias, account.accountId, account.accountName);
+        allMediaData = allMediaData.concat(formattedData);
+        log_(`  ✅ ${formattedData.length}件取得 → 累計: ${allMediaData.length}件`);
+      } else {
+        log_(`  ⏭ データなし`);
+      }
+      successCount++;
+
+    } catch (e) {
+      errorCount++;
+      log_(`  ❌ エラー: ${e.message}`);
+    }
+
+    if (i < accounts.length - 1) {
+      Utilities.sleep(CONFIG.ACCOUNT_WAIT_MS);
+    }
+  }
+
+  log_(`\n===== 集計結果 =====`);
+  log_(`成功: ${successCount}件 / エラー: ${errorCount}件`);
+  log_(`メディア総数: ${allMediaData.length}件`);
+
+  const bqHeader = [
+    'account_id', 'account_name',
+    'media_id', 'media_name', 'media_type',
+    'media_format', 'width', 'height', 'file_size',
+    'playback_time', 'aspect_ratio',
+    'review_status', 'review_result',
+    'created_date', 'updated_date', 'fetch_timestamp'
+  ];
+
+  loadToBigQuery_(CONFIG.TABLES.MEDIA, bqHeader, allMediaData);
+
+  return allMediaData;
+}
+
+/**
+ * メディアデータをフォーマット
+ */
+function formatMediaData_(medias, accountId, accountName) {
+  const timestamp = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm:ss');
+  const results = [];
+
+  medias.forEach(m => {
+    results.push([
+      accountId,
+      accountName,
+      m.id || m.mediaId || '',
+      m.name || m.mediaName || m.title || '',
+      m.type || m.mediaType || '',
+      m.format || m.mediaFormat || m.mimeType || '',
+      m.width || '',
+      m.height || '',
+      m.fileSize || m.size || '',
+      m.playbackTime || m.duration || '',
+      m.aspectRatio || '',
+      m.reviewStatus || m.approvalStatus || '',
+      m.reviewResult || '',
+      m.createdDate || m.createdTime || '',
+      m.updatedDate || m.updatedTime || '',
+      timestamp
+    ]);
+  });
+
+  return results;
+}
+
+// ===========================================
+// 6. 性別レポート取得
 // ===========================================
 
 /**
  * 全アカウントの性別レポートを取得
+ *
+ * LINE Ads API breakdown: attribute: 'GENDER'
  */
 function fetchAllAccountsGenderReport() {
   log_('===== 🚀 全アカウント 性別レポート取得開始 =====');
@@ -891,6 +988,7 @@ function fetchAllAccountsGenderReport() {
     log_(`\n▶ [${i + 1}/${accounts.length}] ${account.accountId} (${account.accountName})`);
 
     try {
+      // アカウントごとにクライアントを作成（認証情報が異なるため）
       const client = new LineAdsClient(account.accountId, account.accessKey, account.secretKey);
       // GENDER breakdown を追加
       const csvData = client.createAndDownloadReport('AD', startStr, endStr, {
@@ -983,11 +1081,13 @@ function formatGenderReportData_(csvData, accountId, accountName) {
 }
 
 // ===========================================
-// 6. 年齢レポート取得
+// 7. 年齢レポート取得
 // ===========================================
 
 /**
  * 全アカウントの年齢レポートを取得
+ *
+ * LINE Ads API breakdown: attribute: 'AGE'
  */
 function fetchAllAccountsAgeReport() {
   log_('===== 🚀 全アカウント 年齢レポート取得開始 =====');
@@ -1012,6 +1112,7 @@ function fetchAllAccountsAgeReport() {
     log_(`\n▶ [${i + 1}/${accounts.length}] ${account.accountId} (${account.accountName})`);
 
     try {
+      // アカウントごとにクライアントを作成（認証情報が異なるため）
       const client = new LineAdsClient(account.accountId, account.accessKey, account.secretKey);
       // AGE breakdown を追加
       const csvData = client.createAndDownloadReport('AD', startStr, endStr, {
@@ -1104,12 +1205,14 @@ function formatAgeReportData_(csvData, accountId, accountName) {
 }
 
 // ===========================================
-// 7. デバイス（OS）レポート取得
+// 8. デバイス（OS）レポート取得
 // ===========================================
 
 /**
  * 全アカウントのデバイス（OS）レポートを取得
- * ※LINE広告ではデバイス別ではなくOS別のレポートになります
+ *
+ * LINE Ads API breakdown: attribute: 'OS'
+ * ※LINE広告ではデバイス別ではなくOS別（iOS/Android）のレポートになります
  */
 function fetchAllAccountsDeviceReport() {
   log_('===== 🚀 全アカウント デバイス（OS）レポート取得開始 =====');
@@ -1134,6 +1237,7 @@ function fetchAllAccountsDeviceReport() {
     log_(`\n▶ [${i + 1}/${accounts.length}] ${account.accountId} (${account.accountName})`);
 
     try {
+      // アカウントごとにクライアントを作成（認証情報が異なるため）
       const client = new LineAdsClient(account.accountId, account.accessKey, account.secretKey);
       // OS breakdown を追加（LINE広告ではDEVICEの代わりにOS）
       const csvData = client.createAndDownloadReport('AD', startStr, endStr, {
@@ -1279,27 +1383,31 @@ function fetchAllData() {
     getAccountList();
     Utilities.sleep(CONFIG.ACCOUNT_WAIT_MS);
 
-    // 2. キャンペーンレポート
-    fetchAllAccountsCampaignReport();
+    // 2. キャンペーン設定
+    getCampaignSettings();
     Utilities.sleep(CONFIG.ACCOUNT_WAIT_MS);
 
-    // 3. 広告グループレポート
-    fetchAllAccountsAdGroupReport();
+    // 3. 広告グループ設定
+    getAdGroupSettings();
     Utilities.sleep(CONFIG.ACCOUNT_WAIT_MS);
 
     // 4. ADレポート
     fetchAllAccountsAdReport();
     Utilities.sleep(CONFIG.ACCOUNT_WAIT_MS);
 
-    // 5. 性別レポート
+    // 5. メディア一覧
+    fetchAllAccountsMedia();
+    Utilities.sleep(CONFIG.ACCOUNT_WAIT_MS);
+
+    // 6. 性別レポート
     fetchAllAccountsGenderReport();
     Utilities.sleep(CONFIG.ACCOUNT_WAIT_MS);
 
-    // 6. 年齢レポート
+    // 7. 年齢レポート
     fetchAllAccountsAgeReport();
     Utilities.sleep(CONFIG.ACCOUNT_WAIT_MS);
 
-    // 7. デバイス（OS）レポート
+    // 8. デバイス（OS）レポート
     fetchAllAccountsDeviceReport();
 
   } catch (e) {
@@ -1384,6 +1492,37 @@ function testAccountAuth() {
   });
 }
 
+/**
+ * メディア一覧テスト
+ */
+function testMediaList() {
+  const accounts = getTargetAccounts_();
+
+  if (accounts.length === 0) {
+    log_('❌ テスト対象のアカウントがありません');
+    return;
+  }
+
+  const account = accounts[0];
+  log_(`===== メディア一覧テスト: ${account.accountId} (${account.accountName}) =====`);
+
+  try {
+    const client = new LineAdsClient(account.accountId, account.accessKey, account.secretKey);
+    const medias = client.getMedias();
+
+    log_(`✅ 取得件数: ${medias.length}`);
+
+    if (medias.length > 0) {
+      log_('--- 最初のメディア ---');
+      log_(JSON.stringify(medias[0], null, 2));
+    }
+
+  } catch (e) {
+    log_(`❌ エラー: ${e.message}`);
+    log_(e.stack);
+  }
+}
+
 // ===========================================
 // スプレッドシート初期設定
 // ===========================================
@@ -1399,12 +1538,18 @@ function setupSpreadsheet() {
   if (!accountSheet) {
     accountSheet = ss.insertSheet('LINE広告アカウント一覧');
     accountSheet.getRange(1, 1, 1, 4).setValues([
-      ['アカウントID', 'アカウント名', 'アクセスキー', 'シークレットキー']
+      ['アカウントID', 'アカウント名', 'AccessKey', 'SecretKey']
     ]).setFontWeight('bold');
     accountSheet.setColumnWidth(1, 150);
     accountSheet.setColumnWidth(2, 200);
-    accountSheet.setColumnWidth(3, 200);
-    accountSheet.setColumnWidth(4, 300);
+    accountSheet.setColumnWidth(3, 250);
+    accountSheet.setColumnWidth(4, 350);
+
+    // サンプル行を追加
+    accountSheet.getRange(2, 1, 1, 4).setValues([
+      ['A12345678901', 'サンプルアカウント', 'your-access-key', 'your-secret-key']
+    ]).setFontColor('#999999');
+
     log_('📊 LINE広告アカウント一覧シートを作成しました');
   }
 
@@ -1422,6 +1567,14 @@ function setupSpreadsheet() {
 
   log_('✅ スプレッドシートの初期設定が完了しました');
   log_('📝 「LINE広告アカウント一覧」シートにアカウント情報を入力してください');
+  log_('');
+  log_('【シート形式】');
+  log_('  A列: アカウントID');
+  log_('  B列: アカウント名');
+  log_('  C列: AccessKey');
+  log_('  D列: SecretKey');
+  log_('');
+  log_('※各アカウントのAccessKey/SecretKeyは広告マネージャーの「グループ設定」から取得できます');
 }
 
 // ===========================================
@@ -1438,15 +1591,20 @@ function onOpen() {
     .addSeparator()
     .addItem('全データ一括取得', 'fetchAllData')
     .addSeparator()
-    .addItem('アカウント一覧', 'getAccountList')
-    .addItem('キャンペーンレポート', 'fetchAllAccountsCampaignReport')
-    .addItem('広告グループレポート', 'fetchAllAccountsAdGroupReport')
-    .addItem('ADレポート', 'fetchAllAccountsAdReport')
-    .addItem('性別レポート', 'fetchAllAccountsGenderReport')
-    .addItem('年齢レポート', 'fetchAllAccountsAgeReport')
-    .addItem('デバイス（OS）レポート', 'fetchAllAccountsDeviceReport')
+    .addSubMenu(ui.createMenu('設定・マスタ取得')
+      .addItem('アカウント一覧', 'getAccountList')
+      .addItem('キャンペーン設定', 'getCampaignSettings')
+      .addItem('広告グループ設定', 'getAdGroupSettings')
+      .addItem('メディア一覧', 'fetchAllAccountsMedia'))
+    .addSubMenu(ui.createMenu('レポート取得')
+      .addItem('ADレポート', 'fetchAllAccountsAdReport')
+      .addItem('性別レポート', 'fetchAllAccountsGenderReport')
+      .addItem('年齢レポート', 'fetchAllAccountsAgeReport')
+      .addItem('デバイス（OS）レポート', 'fetchAllAccountsDeviceReport'))
     .addSeparator()
-    .addItem('テスト: 単一アカウントADレポート', 'testSingleAccountAdReport')
-    .addItem('テスト: アカウント認証', 'testAccountAuth')
+    .addSubMenu(ui.createMenu('テスト')
+      .addItem('単一アカウントADレポート', 'testSingleAccountAdReport')
+      .addItem('アカウント認証', 'testAccountAuth')
+      .addItem('メディア一覧', 'testMediaList'))
     .addToUi();
 }

@@ -1588,6 +1588,257 @@ function setupSpreadsheet() {
 }
 
 // ===========================================
+// スプレッドシート出力用関数
+// ===========================================
+
+/**
+ * メイン関数 - ADレポートをスプレッドシートに出力
+ *
+ * 「シート1」にレポートデータを書き出します。
+ * 取得フィールド:
+ * - Day
+ * - Ad account ID
+ * - Campaign objective
+ * - Ad group ID
+ * - Ad name
+ * - Ad ID
+ * - Title
+ * - Description
+ * - Impressions
+ * - Clicks
+ * - Cost
+ * - Currency
+ * - CV (purchased) (ALL)
+ */
+function main() {
+  const SHEET_NAME = 'シート1';
+
+  log_('===== ADレポート → スプレッドシート出力開始 =====');
+
+  const accounts = getTargetAccounts_();
+  if (accounts.length === 0) {
+    log_('対象アカウントがありません');
+    return;
+  }
+
+  const { startStr, endStr } = getDateRange_(CONFIG.DAY_COUNT, CONFIG.INCLUDE_TODAY);
+  log_(`対象期間: ${startStr} ~ ${endStr}`);
+
+  // ヘッダー行
+  const header = [
+    'Day',
+    'Ad account ID',
+    'Campaign objective',
+    'Ad group ID',
+    'Ad name',
+    'Ad ID',
+    'Title',
+    'Description',
+    'Impressions',
+    'Clicks',
+    'Cost',
+    'Currency',
+    'CV (purchased) (ALL)'
+  ];
+
+  let allData = [header];
+
+  for (let i = 0; i < accounts.length; i++) {
+    const account = accounts[i];
+    log_(`[${i + 1}/${accounts.length}] ${account.accountId} (${account.accountName})`);
+
+    try {
+      const client = new LineAdsClient(account.accountId, account.accessKey, account.secretKey);
+      const csvData = client.createAndDownloadReport('AD', startStr, endStr, { time: 'DAY' });
+
+      if (csvData.length > 1) {
+        const formattedData = formatAdReportForSheet_(csvData, account.accountId);
+        allData = allData.concat(formattedData);
+        log_(`  ${formattedData.length}件取得`);
+      } else {
+        log_(`  データなし`);
+      }
+
+    } catch (e) {
+      log_(`  エラー: ${e.message}`);
+    }
+
+    if (i < accounts.length - 1) {
+      Utilities.sleep(CONFIG.ACCOUNT_WAIT_MS);
+    }
+  }
+
+  // スプレッドシートに書き出し
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(SHEET_NAME);
+
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_NAME);
+  }
+
+  sheet.clearContents();
+
+  const len = allData.length;
+  if (len > 0) {
+    sheet.getRange(1, 1, len, allData[0].length).setValues(allData);
+    log_(`スプレッドシート「${SHEET_NAME}」に${len - 1}件のデータを出力しました`);
+  } else {
+    log_('出力するデータがありませんでした');
+  }
+
+  log_('===== ADレポート → スプレッドシート出力完了 =====');
+}
+
+/**
+ * ADレポートデータをスプレッドシート出力用にフォーマット
+ *
+ * 出力フィールド:
+ * - Day
+ * - Ad account ID
+ * - Campaign objective
+ * - Ad group ID
+ * - Ad name
+ * - Ad ID
+ * - Title
+ * - Description
+ * - Impressions
+ * - Clicks
+ * - Cost
+ * - Currency
+ * - CV (purchased) (ALL)
+ */
+function formatAdReportForSheet_(csvData, accountId) {
+  if (csvData.length < 2) return [];
+
+  const header = csvData[0];
+  const results = [];
+
+  // デバッグ用: ヘッダーをログ出力
+  log_(`  CSVヘッダー: ${header.join(', ')}`);
+
+  const idx = {
+    DAY: findColumnIndex_(header, ['Day', '日付', 'date', 'day', 'Date']),
+    AD_ACCOUNT_ID: findColumnIndex_(header, ['Ad account ID', 'アカウントID', 'account_id', 'adAccountId', 'adaccount_id']),
+    CAMPAIGN_OBJECTIVE: findColumnIndex_(header, ['Campaign objective', 'キャンペーン目的', 'campaign_objective', 'campaignObjective', 'objective']),
+    ADGROUP_ID: findColumnIndex_(header, ['Ad group ID', '広告グループID', 'adgroup_id', 'adgroupId', 'ad_group_id', 'adGroupId']),
+    AD_NAME: findColumnIndex_(header, ['Ad name', '広告名', 'ad_name', 'adName', 'creative_name', 'creativeName']),
+    AD_ID: findColumnIndex_(header, ['Ad ID', '広告ID', 'ad_id', 'adId', 'creative_id', 'creativeId']),
+    TITLE: findColumnIndex_(header, ['Title', 'タイトル', 'title', 'headline']),
+    DESCRIPTION: findColumnIndex_(header, ['Description', '説明文', 'description', 'desc', 'body']),
+    IMPRESSIONS: findColumnIndex_(header, ['Impressions', 'インプレッション', 'impressions', 'imps', 'imp']),
+    CLICKS: findColumnIndex_(header, ['Clicks', 'クリック', 'clicks', 'click']),
+    COST: findColumnIndex_(header, ['Cost', '費用', 'cost', 'spend', '消化金額', '利用金額']),
+    CURRENCY: findColumnIndex_(header, ['Currency', '通貨', 'currency']),
+    CV_PURCHASED: findColumnIndex_(header, ['CV (purchased) (ALL)', 'コンバージョン（購入）', 'cv_purchased', 'conversions_purchase', 'purchase_conversions', 'CV(購入)', 'コンバージョン', 'conversions', 'cv', 'CV'])
+  };
+
+  // デバッグ用: 見つかったインデックスをログ出力
+  log_(`  カラムインデックス: DAY=${idx.DAY}, AD_ACCOUNT_ID=${idx.AD_ACCOUNT_ID}, CAMPAIGN_OBJECTIVE=${idx.CAMPAIGN_OBJECTIVE}`);
+  log_(`  ADGROUP_ID=${idx.ADGROUP_ID}, AD_NAME=${idx.AD_NAME}, AD_ID=${idx.AD_ID}`);
+  log_(`  TITLE=${idx.TITLE}, DESCRIPTION=${idx.DESCRIPTION}, CV_PURCHASED=${idx.CV_PURCHASED}`);
+
+  for (let i = 1; i < csvData.length; i++) {
+    const row = csvData[i];
+    if (!row || row.length === 0 || !row[0]) continue;
+
+    // Ad account IDはCSVにあれば使用、なければ引数のaccountIdを使用
+    const adAccountId = idx.AD_ACCOUNT_ID >= 0 ? getValueSafe_(row, idx.AD_ACCOUNT_ID) : accountId;
+
+    results.push([
+      getValueSafe_(row, idx.DAY),
+      adAccountId,
+      getValueSafe_(row, idx.CAMPAIGN_OBJECTIVE),
+      getValueSafe_(row, idx.ADGROUP_ID),
+      getValueSafe_(row, idx.AD_NAME),
+      getValueSafe_(row, idx.AD_ID),
+      getValueSafe_(row, idx.TITLE),
+      getValueSafe_(row, idx.DESCRIPTION),
+      getNumberSafe_(row, idx.IMPRESSIONS),
+      getNumberSafe_(row, idx.CLICKS),
+      getNumberSafe_(row, idx.COST),
+      getValueSafe_(row, idx.CURRENCY),
+      getNumberSafe_(row, idx.CV_PURCHASED)
+    ]);
+  }
+
+  return results;
+}
+
+/**
+ * 単一アカウント用のシンプルなスプレッドシート出力
+ *
+ * アカウント情報をコードに直接記述する場合に使用します。
+ * スプレッドシートでアカウント管理しない場合向け。
+ */
+function exportSingleAccountToSheet() {
+  const SHEET_NAME = 'シート1';
+
+  // 単一アカウント設定（必要に応じて変更）
+  const accountId = 'A55356342538';
+  const accessKey = 'yK0nvZ2bbKccFykx';
+  const secretKey = 'MiyccBCYHpz5QksbQvKpBu2e2lnRfoO5';
+
+  log_('===== 単一アカウント ADレポート → スプレッドシート出力開始 =====');
+
+  const { startStr, endStr } = getDateRange_(80, false);
+  log_(`対象期間: ${startStr} ~ ${endStr}`);
+
+  const header = [
+    'Day',
+    'Ad account ID',
+    'Campaign objective',
+    'Ad group ID',
+    'Ad name',
+    'Ad ID',
+    'Title',
+    'Description',
+    'Impressions',
+    'Clicks',
+    'Cost',
+    'Currency',
+    'CV (purchased) (ALL)'
+  ];
+
+  let allData = [header];
+
+  try {
+    const client = new LineAdsClient(accountId, accessKey, secretKey);
+    const csvData = client.createAndDownloadReport('AD', startStr, endStr, { time: 'DAY' });
+
+    if (csvData.length > 1) {
+      const formattedData = formatAdReportForSheet_(csvData, accountId);
+      allData = allData.concat(formattedData);
+      log_(`${formattedData.length}件取得`);
+    } else {
+      log_('データなし');
+    }
+
+  } catch (e) {
+    log_(`エラー: ${e.message}`);
+    log_(e.stack);
+    return;
+  }
+
+  // スプレッドシートに書き出し
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(SHEET_NAME);
+
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_NAME);
+  }
+
+  sheet.clearContents();
+
+  const len = allData.length;
+  if (len > 0) {
+    sheet.getRange(1, 1, len, allData[0].length).setValues(allData);
+    log_(`スプレッドシート「${SHEET_NAME}」に${len - 1}件のデータを出力しました`);
+  }
+
+  log_('===== 単一アカウント ADレポート → スプレッドシート出力完了 =====');
+}
+
+// ===========================================
 // メニュー追加
 // ===========================================
 
@@ -1599,7 +1850,11 @@ function onOpen() {
   ui.createMenu('LINE広告データ取得')
     .addItem('初期設定（シート作成）', 'setupSpreadsheet')
     .addSeparator()
-    .addItem('全データ一括取得', 'fetchAllData')
+    .addSubMenu(ui.createMenu('スプレッドシート出力')
+      .addItem('ADレポート → シート1', 'main')
+      .addItem('単一アカウント → シート1', 'exportSingleAccountToSheet'))
+    .addSeparator()
+    .addItem('全データ一括取得（BQ）', 'fetchAllData')
     .addSeparator()
     .addSubMenu(ui.createMenu('設定・マスタ取得')
       .addItem('アカウント一覧', 'getAccountList')

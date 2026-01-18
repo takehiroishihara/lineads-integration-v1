@@ -786,11 +786,12 @@ function fetchAllAccountsAdReport() {
 
   const bqHeader = [
     'account_id', 'account_name', 'day',
-    'campaign_id', 'campaign_name',
-    'adgroup_id', 'adgroup_name',
+    'campaign_id', 'adgroup_id',
     'ad_id', 'ad_name', 'ad_status', 'ad_type',
-    'impressions', 'clicks', 'conversions', 'cost',
-    'ctr', 'cpc', 'cpm', 'cvr'
+    'impressions', 'clicks', 'cost',
+    // コンバージョン関連（複数取得して確認用）
+    'conversions', 'total_conversions', 'conversion_value',
+    'results', 'actions', 'view_conversions', 'click_conversions'
   ];
 
   loadToBigQuery_(CONFIG.TABLES.AD, bqHeader, allData);
@@ -807,25 +808,33 @@ function formatAdReportData_(csvData, accountId, accountName) {
   const header = csvData[0];
   const results = [];
 
+  // デバッグ用: ヘッダーをログ出力
+  log_(`  📋 CSVヘッダー: ${header.join(', ')}`);
+
   const idx = {
-    DAY: findColumnIndex_(header, ['日付', 'date', 'day']),
-    CAMPAIGN_ID: findColumnIndex_(header, ['キャンペーンID', 'campaign_id', 'campaignId']),
-    CAMPAIGN_NAME: findColumnIndex_(header, ['キャンペーン名', 'campaign_name', 'campaignName']),
-    ADGROUP_ID: findColumnIndex_(header, ['広告グループID', 'adgroup_id', 'adgroupId', 'ad_group_id']),
-    ADGROUP_NAME: findColumnIndex_(header, ['広告グループ名', 'adgroup_name', 'adgroupName', 'ad_group_name']),
-    AD_ID: findColumnIndex_(header, ['広告ID', 'ad_id', 'adId']),
-    AD_NAME: findColumnIndex_(header, ['広告名', 'ad_name', 'adName']),
-    AD_STATUS: findColumnIndex_(header, ['ステータス', 'status', 'ad_status']),
-    AD_TYPE: findColumnIndex_(header, ['広告タイプ', 'ad_type', 'adType']),
-    IMPRESSIONS: findColumnIndex_(header, ['インプレッション', 'impressions', 'imps']),
-    CLICKS: findColumnIndex_(header, ['クリック', 'clicks']),
-    CONVERSIONS: findColumnIndex_(header, ['コンバージョン', 'conversions', 'cv']),
-    COST: findColumnIndex_(header, ['費用', 'cost', 'spend']),
-    CTR: findColumnIndex_(header, ['CTR', 'ctr']),
-    CPC: findColumnIndex_(header, ['CPC', 'cpc']),
-    CPM: findColumnIndex_(header, ['CPM', 'cpm']),
-    CVR: findColumnIndex_(header, ['CVR', 'cvr'])
+    DAY: findColumnIndex_(header, ['日付', 'date', 'day', 'Date']),
+    CAMPAIGN_ID: findColumnIndex_(header, ['キャンペーンID', 'campaign_id', 'campaignId', 'Campaign ID', 'campaign id']),
+    ADGROUP_ID: findColumnIndex_(header, ['広告グループID', 'adgroup_id', 'adgroupId', 'ad_group_id', 'Ad Group ID', 'adGroupId']),
+    AD_ID: findColumnIndex_(header, ['広告ID', 'ad_id', 'adId', 'Ad ID', 'creative_id', 'creativeId']),
+    AD_NAME: findColumnIndex_(header, ['広告名', 'ad_name', 'adName', 'Ad Name', 'creative_name', 'creativeName', 'クリエイティブ名']),
+    AD_STATUS: findColumnIndex_(header, ['ステータス', 'status', 'ad_status', 'Status']),
+    AD_TYPE: findColumnIndex_(header, ['広告タイプ', 'ad_type', 'adType', 'Ad Type', 'format', 'Format']),
+    IMPRESSIONS: findColumnIndex_(header, ['インプレッション', 'impressions', 'imps', 'Impressions', 'imp']),
+    CLICKS: findColumnIndex_(header, ['クリック', 'clicks', 'Clicks', 'click']),
+    COST: findColumnIndex_(header, ['費用', 'cost', 'spend', 'Cost', 'Spend', '消化金額', '利用金額']),
+    // コンバージョン関連フィールド（複数取得して確認）
+    CONVERSIONS: findColumnIndex_(header, ['コンバージョン', 'conversions', 'cv', 'Conversions', 'CV']),
+    TOTAL_CONVERSIONS: findColumnIndex_(header, ['総コンバージョン', 'total_conversions', 'totalConversions', 'Total Conversions']),
+    CONVERSION_VALUE: findColumnIndex_(header, ['コンバージョン値', 'conversion_value', 'conversionValue', 'Conversion Value', 'コンバージョン金額', 'cv_value']),
+    RESULTS: findColumnIndex_(header, ['成果', '結果', 'results', 'Results', 'result', 'Result']),
+    ACTIONS: findColumnIndex_(header, ['アクション', 'actions', 'Actions', 'action', 'Action']),
+    VIEW_CONVERSIONS: findColumnIndex_(header, ['ビュースルーコンバージョン', 'view_through_conversions', 'viewThroughConversions', 'View Through Conversions', 'vtc', 'VTC']),
+    CLICK_CONVERSIONS: findColumnIndex_(header, ['クリックスルーコンバージョン', 'click_through_conversions', 'clickThroughConversions', 'Click Through Conversions', 'ctc', 'CTC'])
   };
+
+  // デバッグ用: 見つかったインデックスをログ出力
+  log_(`  🔍 カラムインデックス: CAMPAIGN_ID=${idx.CAMPAIGN_ID}, ADGROUP_ID=${idx.ADGROUP_ID}, AD_ID=${idx.AD_ID}, AD_NAME=${idx.AD_NAME}`);
+  log_(`  🔍 コンバージョン系: CONVERSIONS=${idx.CONVERSIONS}, TOTAL_CONVERSIONS=${idx.TOTAL_CONVERSIONS}, CONVERSION_VALUE=${idx.CONVERSION_VALUE}, RESULTS=${idx.RESULTS}, ACTIONS=${idx.ACTIONS}, VIEW_CONVERSIONS=${idx.VIEW_CONVERSIONS}, CLICK_CONVERSIONS=${idx.CLICK_CONVERSIONS}`);
 
   for (let i = 1; i < csvData.length; i++) {
     const row = csvData[i];
@@ -836,21 +845,22 @@ function formatAdReportData_(csvData, accountId, accountName) {
       accountName,
       getValueSafe_(row, idx.DAY),
       getValueSafe_(row, idx.CAMPAIGN_ID),
-      getValueSafe_(row, idx.CAMPAIGN_NAME),
       getValueSafe_(row, idx.ADGROUP_ID),
-      getValueSafe_(row, idx.ADGROUP_NAME),
       getValueSafe_(row, idx.AD_ID),
       getValueSafe_(row, idx.AD_NAME),
       getValueSafe_(row, idx.AD_STATUS),
       getValueSafe_(row, idx.AD_TYPE),
       getNumberSafe_(row, idx.IMPRESSIONS),
       getNumberSafe_(row, idx.CLICKS),
-      getNumberSafe_(row, idx.CONVERSIONS),
       getNumberSafe_(row, idx.COST),
-      getNumberSafe_(row, idx.CTR),
-      getNumberSafe_(row, idx.CPC),
-      getNumberSafe_(row, idx.CPM),
-      getNumberSafe_(row, idx.CVR)
+      // コンバージョン関連（複数取得）
+      getNumberSafe_(row, idx.CONVERSIONS),
+      getNumberSafe_(row, idx.TOTAL_CONVERSIONS),
+      getNumberSafe_(row, idx.CONVERSION_VALUE),
+      getNumberSafe_(row, idx.RESULTS),
+      getNumberSafe_(row, idx.ACTIONS),
+      getNumberSafe_(row, idx.VIEW_CONVERSIONS),
+      getNumberSafe_(row, idx.CLICK_CONVERSIONS)
     ]);
   }
 
